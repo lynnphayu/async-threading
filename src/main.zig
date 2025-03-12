@@ -1,108 +1,92 @@
 const std = @import("std");
 const http = std.http;
 const log = std.log.scoped(.server);
+const thread_log = std.log.scoped(.thread);
 const net = std.net;
 const xev = @import("xev");
+const mem = std.mem;
 
 const server_addr = [4]u8{ 0, 0, 0, 0 };
 const server_port = 8080;
+const max_threads = 4;
 
 const RequestJob = struct {
     task: xev.ThreadPool.Task,
-    connection: net.Server.Connection,
-    arena: std.heap.ArenaAllocator,
+    connection: *net.Server.Connection,
+    allocator: *std.mem.Allocator,
 };
 
-fn handler(connection: net.Server.Connection) !void {
-    log.info("Threadpool job processing", .{});
+const EventLoop = struct {
+    loop: xev.Loop,
+    occupied: bool,
+};
 
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer std.debug.assert(gpa.deinit() == .ok);
-    const allocator = gpa.allocator();
+const EventLoopList = std.ArrayList(EventLoop);
 
-    const read_buffer = try allocator.alloc(u8, 1024);
-    defer allocator.free(read_buffer);
-    var http_server = std.http.Server.init(connection, read_buffer);
-    var request = try http_server.receiveHead();
+const ConnectionWrapper = struct {
+    connection: net.Server.Connection,
+};
 
-    // log.info("Received headers: ", .{});
-    // var header_iterator = request.iterateHeaders();
-    // while (header_iterator.next()) |header| {
-    //     log.info("  {s}: {s}", .{ header.name, header.value });
-    // }
+fn handler(data: *net.Server.Connection) !void {
+    const conn = data;
+    defer conn.stream.close();
 
-    const content_reader = try request.reader();
-    const body = try content_reader.readAllAlloc(allocator, 1024 * 1024 * 10);
-    defer allocator.free(body);
-    log.info("Received body: {s}", .{body});
-    try request.respond("Hello, World!", .{
-        .status = .ok,
-        .extra_headers = &[_]http.Header{
-            .{ .name = "Content-Type", .value = "text/plain" },
-        },
+    var recv_buf: [1024]u8 = undefined;
+    _ = try conn.stream.read(&recv_buf);
+
+    const headers = try http.Server.Request.Head.parse(&recv_buf);
+    log.info("Request: {}", .{headers.method});
+
+    const response = "{\"message\": \"Hello, World!\"}";
+    const httpHead =
+        "HTTP/1.1 200 OK \r\n" ++
+        "Connection: close\r\n" ++
+        "Content-Type: {s}\r\n" ++
+        "Content-Length: {}\r\n" ++
+        "\r\n";
+    _ = try conn.stream.writer().print(httpHead, .{
+        "text/json",
+        response.len,
     });
-    log.info("Responded to request", .{});
+    _ = try conn.stream.writer().writeAll(response);
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer std.debug.assert(gpa.deinit() == .ok);
-    const allocator = gpa.allocator();
-
     const address = net.Address.initIp4(server_addr, server_port);
     var server = try address.listen(.{
         .reuse_address = true,
+        .reuse_port = true,
     });
     defer server.deinit();
 
     var thread_pool = xev.ThreadPool.init(.{
         .stack_size = 1024 * 1024,
-        .max_threads = 4,
+        .max_threads = max_threads,
     });
     defer thread_pool.deinit();
-
-    // var loop = try xev.Loop.init(.{});
-    // defer loop.deinit();
+    var event_loop = xev.Loop.init(.{ .thread_pool = &thread_pool }) catch |err| {
+        log.err("Failed to init event loop: {}", .{err});
+        return error.FailedToInitEventLoop;
+    };
+    defer event_loop.deinit();
 
     log.info("Starting server on {s}:{d}", .{ server_addr, server_port });
 
-    while (true) {
-        const connection = try server.accept();
-        const addr = connection.address;
-        log.info("Server accepting connection from {}", .{addr.in.getPort()});
-
-        var arena = std.heap.ArenaAllocator.init(allocator);
-        var request_job = try arena.allocator().create(RequestJob);
-        request_job.* = RequestJob{
-            .task = xev.ThreadPool.Task{
-                .callback = threadpool_job,
-            },
-            .connection = connection,
-            .arena = arena,
-        };
-
-        thread_pool.schedule(xev.ThreadPool.Batch.from(&request_job.task));
-
-        // var proc = try xev.Async.init();
-        // defer proc.deinit();
-        // var completion: xev.Completion = undefined;
-        // proc.wait(&loop, &completion, http.Server.Request, &request, timerCallback);
-        // try proc.notify();
-        // try loop.run(.until_done);
-
-        // Create the request task
-
+    while (server.accept()) |conn| {
+        var connection = conn;
+        var c: xev.Completion = undefined;
+        var async_task = try xev.Async.init();
+        async_task.wait(&event_loop, &c, net.Server.Connection, &connection, callback);
+        try async_task.notify();
+        try event_loop.run(.until_done);
+    } else |err| {
+        log.err("Server failed to accept connection: {s}", .{@errorName(err)});
+        return error.ServerFailedToAcceptConnection;
     }
 }
 
-fn threadpool_job(task: *xev.ThreadPool.Task) void {
-    const request_job = @as(*RequestJob, @fieldParentPtr("task", task));
-    handler(request_job.connection) catch unreachable;
-    request_job.connection.stream.close();
-}
-
-fn timerCallback(
-    userdata: ?*http.Server.Request,
+fn callback(
+    userdata: ?*net.Server.Connection,
     loop: *xev.Loop,
     c: *xev.Completion,
     result: xev.ReadError!void,
@@ -111,7 +95,8 @@ fn timerCallback(
     _ = c;
     _ = result catch unreachable;
 
-    log.info("Timer callback", .{});
-    handler(userdata) catch unreachable;
+    handler(userdata.?) catch |err| {
+        thread_log.err("Handler error: {}", .{err});
+    };
     return .disarm;
 }
