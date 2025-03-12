@@ -37,7 +37,7 @@ fn handler(data: *net.Server.Connection) !void {
     const headers = try http.Server.Request.Head.parse(&recv_buf);
     log.info("Request: {}", .{headers.method});
 
-    const response = "{\"message\": \"Hello, World!\"}";
+    const response = "{\"message\": \"HI!\"}";
     const httpHead =
         "HTTP/1.1 200 OK \r\n" ++
         "Connection: close\r\n" ++
