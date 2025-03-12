@@ -10,10 +10,9 @@ They implement what they call **lock-free unbounded** memory management. The con
 I can not explain it further since I am also still working to fully understand how they took each step of the way. If you'd like to know more, you can check out the original article [Resource efficient Thread Pools](https://zig.news/kprotty/resource-efficient-thread-pools-with-zig-3291).
 
 
-The thread pool implementation in libxev is directly derived from [Zap](https://github.com/kprotty/zap), created by the author of the article I just mentioned above.
+The thread pool implementation in libxev is almost directly copied from [Zap](https://github.com/kprotty/zap), created by the author of the article I just mentioned above, with very little or no modification by Mitchell Hashimoto.
 
 With all that being said, in theory, these ideas should allow an HTTP server to effiently utilize the full capacity of the underlying hardware.
-
 
 
 - Zig (latest version)
