@@ -3,6 +3,9 @@ const xev = @import("xev");
 const server = @import("server.zig");
 
 const Server = server.Server;
+// pub const std_options = std.Options{
+//     .log_level = std.log.Level.info,
+// };
 
 const server_addr = [4]u8{ 0, 0, 0, 0 };
 const server_port = 8080;

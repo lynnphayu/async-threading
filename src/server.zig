@@ -24,21 +24,21 @@ pub const Server = struct {
             .reuse_address = true,
             .reuse_port = true,
         });
-        log.info("initialized tcp server", .{});
+        log.debug("initialized tcp server", .{});
 
         var thread_pool = xev.ThreadPool.init(.{
             .stack_size = 1024 * 1024,
             .max_threads = @as(u32, @intCast(std.Thread.getCpuCount() catch 1)),
         });
-        log.info("initialized thread pool", .{});
+        log.debug("initialized thread pool", .{});
         const event_loop = xev.Loop.init(.{ .thread_pool = &thread_pool }) catch |err| {
             log.err("Failed to init event loop: {}", .{err});
             return error.FailedToInitEventLoop;
         };
-        log.info("initialized event loop", .{});
+        log.debug("initialized event loop", .{});
 
         const route_registry = std.AutoHashMap(http.Method, std.StringHashMap(*const RouteHandler)).init(allocator.*);
-        log.info("initialized route registry", .{});
+        log.debug("initialized route registry", .{});
 
         return Server{
             .tcp_server = server,
@@ -64,7 +64,7 @@ pub const Server = struct {
         var route_map = std.StringHashMap(*const RouteHandler).init(self.allocator.*);
         try route_map.put(path, handler);
         try self.routes.put(method, route_map);
-        log.info("registered route : {} {s}", .{ method, path });
+        log.debug("registered route : {} {s}", .{ method, path });
     }
 
     pub fn accept(self: *Server) anyerror!void {
