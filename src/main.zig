@@ -1,7 +1,6 @@
 const std = @import("std");
 const http = std.http;
-const log = std.log.scoped(.server);
-const thread_log = std.log.scoped(.thread);
+const log = std.log;
 const net = std.net;
 const xev = @import("xev");
 const mem = std.mem;
@@ -24,20 +23,41 @@ const EventLoop = struct {
 const EventLoopList = std.ArrayList(EventLoop);
 
 const ConnectionWrapper = struct {
+    alloc: *std.mem.Allocator,
     connection: net.Server.Connection,
 };
 
-fn handler(data: *net.Server.Connection) !void {
+fn handler(data: net.Server.Connection, allocator: *std.mem.Allocator) !void {
+    // var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    // defer std.debug.assert(gpa.deinit() == .ok);
+    // const allocator = gpa.allocator();
+
+    var header_raw = std.ArrayList(u8).init(allocator.*);
+    var body_raw = std.ArrayList(u8).init(allocator.*);
+    defer header_raw.deinit();
+    defer body_raw.deinit();
+
     const conn = data;
     defer conn.stream.close();
 
-    var recv_buf: [1024]u8 = undefined;
-    _ = try conn.stream.read(&recv_buf);
+    // const reader = conn.stream.reader();
 
-    const headers = try http.Server.Request.Head.parse(&recv_buf);
-    log.info("Request: {}", .{headers.method});
+    var recv_buf: [1024 * 2]u8 = undefined;
 
-    const response = "{\"message\": \"HI!\"}";
+    var blocking_server = http.Server.init(conn, &recv_buf);
+    var request = try blocking_server.receiveHead();
+    log.info("{any} {s}", .{ request.head.method, request.head.target });
+
+    const reader = try request.reader();
+    while (true) {
+        reader
+            .streamUntilDelimiter(body_raw.writer(), '\r', 1024) catch |err| {
+            if (err == error.EndOfStream) break;
+            return error.FailedToReadBody;
+        };
+    }
+
+    const response = body_raw.items;
     const httpHead =
         "HTTP/1.1 200 OK \r\n" ++
         "Connection: close\r\n" ++
@@ -45,13 +65,17 @@ fn handler(data: *net.Server.Connection) !void {
         "Content-Length: {}\r\n" ++
         "\r\n";
     _ = try conn.stream.writer().print(httpHead, .{
-        "text/json",
+        "application/json",
         response.len,
     });
     _ = try conn.stream.writer().writeAll(response);
 }
 
 pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    var allocator = gpa.allocator();
+
     const address = net.Address.initIp4(server_addr, server_port);
     var server = try address.listen(.{
         .reuse_address = true,
@@ -73,10 +97,14 @@ pub fn main() !void {
     log.info("Starting server on {s}:{d}", .{ server_addr, server_port });
 
     while (server.accept()) |conn| {
-        var connection = conn;
+        const connection = conn;
         var c: xev.Completion = undefined;
         var async_task = try xev.Async.init();
-        async_task.wait(&event_loop, &c, net.Server.Connection, &connection, callback);
+        var connection_wrapper = ConnectionWrapper{
+            .alloc = &allocator,
+            .connection = connection,
+        };
+        async_task.wait(&event_loop, &c, ConnectionWrapper, &connection_wrapper, callback);
         try async_task.notify();
         try event_loop.run(.until_done);
     } else |err| {
@@ -86,7 +114,7 @@ pub fn main() !void {
 }
 
 fn callback(
-    userdata: ?*net.Server.Connection,
+    userdata: ?*ConnectionWrapper,
     loop: *xev.Loop,
     c: *xev.Completion,
     result: xev.ReadError!void,
@@ -95,8 +123,13 @@ fn callback(
     _ = c;
     _ = result catch unreachable;
 
-    handler(userdata.?) catch |err| {
-        thread_log.err("Handler error: {}", .{err});
+    const time_start = std.time.milliTimestamp();
+
+    handler(userdata.?.connection, userdata.?.alloc) catch |err| {
+        log.err("Handler error: {}", .{err});
     };
+
+    const time_end = std.time.milliTimestamp();
+    log.info("{d} ms", .{time_end - time_start});
     return .disarm;
 }
